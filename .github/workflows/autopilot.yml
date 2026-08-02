@@ -1,0 +1,69 @@
+name: Copilot Autopilot
+
+run-name: "Autopilot: ${{ inputs.instruction }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      instruction:
+        description: "Autopilot instruction"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  autopilot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare branch
+        id: prep
+        run: |
+          set -euo pipefail
+          branch="autopilot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git checkout -b "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
+
+      - name: Run Copilot Autopilot
+        env:
+          GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: copilot --autopilot -p "${{ inputs.instruction }}" --allow-all
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.PR_CREATOR_TOKEN || github.token }}
+          INSTRUCTION: ${{ inputs.instruction }}
+          WORK_BRANCH: ${{ steps.prep.outputs.branch }}
+        run: |
+          set -euo pipefail
+          base="${GITHUB_REF_NAME}"
+          current="$(git rev-parse --abbrev-ref HEAD)"
+          if [ "$current" = "$base" ] && [ -n "${WORK_BRANCH:-}" ]; then
+            git checkout "$WORK_BRANCH" || true
+            current="$(git rev-parse --abbrev-ref HEAD)"
+          fi
+          git push -u origin "$current" >/dev/null 2>&1 || true
+          ahead="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${base}...${current}" --jq '.ahead_by' 2>/dev/null || echo 0)"
+          if [ "$ahead" = "0" ]; then
+            echo "No changes to open a PR for."
+            exit 0
+          fi
+          title="Autopilot: ${INSTRUCTION}"
+          [ ${#title} -gt 110 ] && title="${title:0:107}..."
+          gh pr create --base "$base" --head "$current" --title "$title" --body "Automated by Copilot autopilot." \
+            || gh pr list --head "$current" --base "$base" --state all --json number,url --jq '.[] | "PR #\(.number) \(.url)"'
